@@ -1,16 +1,15 @@
 import express from "express";
 import { createCanvas } from "canvas";
 import pdfjsLib from "pdfjs-dist/legacy/build/pdf.js";
-
-
 import fetch from "node-fetch";
-pdfjsLib.GlobalWorkerOptions.workerSrc =
-new URL("pdfjs-dist/build/pdf.worker.mjs", import.meta.url).toString();
 
+// 🔥 CRITICAL FIX: disable pdfjs worker completely for Node
+pdfjsLib.GlobalWorkerOptions.workerSrc = null;
 
 const app = express();
 app.use(express.json({ limit: "50mb" }));
 
+// Health check
 app.get("/", (req, res) => {
   res.send("PDF → JPG service running");
 });
@@ -18,39 +17,56 @@ app.get("/", (req, res) => {
 app.post("/convert", async (req, res) => {
   try {
     const { pdfUrl } = req.body;
+
     if (!pdfUrl) {
       return res.status(400).json({ error: "pdfUrl is required" });
     }
 
-    // Download PDF
-    const pdfBuffer = await fetch(pdfUrl).then(r => r.arrayBuffer());
+    // 1️⃣ Download PDF
+    const response = await fetch(pdfUrl);
+    if (!response.ok) {
+      throw new Error("Failed to fetch PDF");
+    }
 
-    // Load PDF
-    const pdf = await pdfjsLib.getDocument({ data: pdfBuffer }).promise;
+    const pdfBuffer = await response.arrayBuffer();
+
+    // 2️⃣ Load PDF (NODE MODE)
+    const pdf = await pdfjsLib.getDocument({
+      data: pdfBuffer,
+      disableWorker: true // 🔥 MUST
+    }).promise;
 
     const images = [];
 
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const page = await pdf.getPage(i);
-      const viewport = page.getViewport({ scale: 2 });
+    // 3️⃣ Convert each page to JPG
+    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+      const page = await pdf.getPage(pageNum);
 
+      const viewport = page.getViewport({ scale: 2 }); // DPI control here
       const canvas = createCanvas(viewport.width, viewport.height);
       const ctx = canvas.getContext("2d");
 
-      await page.render({ canvasContext: ctx, viewport }).promise;
+      await page.render({
+        canvasContext: ctx,
+        viewport
+      }).promise;
 
       const jpgBuffer = canvas.toBuffer("image/jpeg", { quality: 0.9 });
-      images.push(jpgBuffer.toString("base64"));
+
+      images.push({
+        page: pageNum,
+        base64: jpgBuffer.toString("base64")
+      });
     }
 
     res.json({
       success: true,
-      pages: images.length,
+      totalPages: pdf.numPages,
       images
     });
 
   } catch (err) {
-    console.error(err);
+    console.error("PDF CONVERT ERROR:", err);
     res.status(500).json({ error: err.message });
   }
 });
